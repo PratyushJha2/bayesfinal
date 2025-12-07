@@ -362,7 +362,7 @@ query_string &lt;- &quot;select+pl_name,disc_year,pl_rade,pl_orbper,st_met,st_te
 full_url &lt;- paste0(base_url, &quot;?query=&quot;, query_string)
 
 raw_planets &lt;- read_csv(full_url)</code></pre>
-<pre><code>## Rows: 6052 Columns: 7
+<pre><code>## Rows: 6053 Columns: 7
 ## ── Column specification ────────────────────────────────────────────────────────
 ## Delimiter: &quot;,&quot;
 ## chr (2): pl_name, discoverymethod
@@ -384,6 +384,12 @@ raw_planets &lt;- read_csv(full_url)</code></pre>
     !is.na(st_teff_k),
     !is.na(discoverymethod)
   )</code></pre>
+<pre class="model"><code>yearly_counts &lt;- clean_data %&gt;%
+  count(disc_year) %&gt;%
+  rename(n_planets = n)
+
+head(yearly_counts)
+</code></pre>
 
 
 
