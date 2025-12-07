@@ -39,6 +39,31 @@ yearly_counts <- clean_data %>%
 
 head(yearly_counts)
 
+poisson_stan_code <- "
+data {
+  int<lower=0> N;
+  int<lower=0> y[N];
+}
+parameters {
+  real<lower=0> lambda;
+}
+model {
+  lambda ~ gamma(2, 0.1);
+  y ~ poisson(lambda);
+}
+"
+
+stan_data <- list(
+  N = nrow(yearly_counts),
+  y = yearly_counts$n_planets
+)
+
+poisson_fit <- stan(
+  model_code = poisson_stan_code,
+  data = stan_data,
+  iter = 2000,
+  chains = 4
+)
 ```
 
 
