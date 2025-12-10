@@ -75,57 +75,7 @@ poisson_fit <- stan(
 )
 ```
 
-## Prior Diagnostics, Trace Plot
-```{r}
-print(poisson_fit, pars = "lambda")
-color_scheme_set("brightblue")
-
-mcmc_trace(
-  as.array(poisson_fit),
-  pars = "lambda"
-)
-```
-
-## Density Plot
-```{r}
-mcmc_dens(as.array(poisson_fit), pars = "lambda")
-```
- 
-## Autocorrelation Plot
-```{r}
-mcmc_acf(as.array(poisson_fit), pars = "lambda")
-```
-
-## R-Hat, Effective Sample Size
-```{r}
-summary(poisson_fit)$summary[, c("Rhat", "n_eff")]
-```
 
 
-## Closed Form Posterior
-We model: 
 
-$$\lambda | y \sim Gamma(a + \Sigma y, \beta + N)$$
 
-```{r}
-alpha_prior <- 2
-beta_prior <- 0.1
-
-sum_y <- sum(yearly_counts$n_planets)
-N <- nrow(yearly_counts)
-alpha_post <- alpha_prior + sum_y
-beta_post <- beta_prior + N
-
-#posterior mean
-alpha_post / beta_post
-```
-
-## Comparison with MCMC mean
-```{r}
-posterior_samples <- extract(poisson_fit)$lambda
-mean(posterior_samples)
-```
-
-Here, we modeled the yearly number of exoplanet discoveries using a Poisson likelihood with $Gamma (2,0.1)$ prior on the rate parameter $\gamma$. 
-We estimated the posterior distribution using Hamiltonian Monte Carlo via Stan. Trace plots, density plots, and autocorrelation diagnostics indicate good chain mixing, given R-hat values hover around 1.00 and effective sample sizes appear high.
-We also derived the closed-form Gamma posterior due to conjugacy and found strong agreement between the theoretical posterior mean and the MCMC based posterior mean, confirming correct model implementatoin and convergencead
