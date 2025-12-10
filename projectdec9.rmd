@@ -1,0 +1,479 @@
+---
+title: "Bayesian Analysis of Exoplanet Properties"
+author: Aleks Likhoshva, Pratyush Jha
+output: html_document
+---
+```{r message=FALSE, warning=FALSE}
+library(tidyverse)
+library(rstan)
+library(rstanarm)
+library(bayesplot)
+```
+
+```{r}
+options(mc.cores = parallel::detectCores())
+rstan_options(auto_write = TRUE)
+rstan_options(threads_per_chain = 2)
+```
+
+
+```{r}
+base_url <- "https://exoplanetarchive.ipac.caltech.edu/TAP/sync"
+query_string <- "select+pl_name,disc_year,pl_rade,pl_orbper,st_met,st_teff,discoverymethod,st_mass,sy_pnum+from+ps+where+default_flag=1&format=csv"
+full_url <- paste0(base_url, "?query=", query_string)
+
+raw_planets <- read_csv(full_url)
+
+clean_data <- raw_planets %>%
+  mutate(
+    log_radius = log(pl_rade),
+    log_period = log(pl_orbper),
+    log_st_mass = log(st_mass),
+    st_teff_k = st_teff / 1000,
+    method_group = fct_lump(discoverymethod, n = 3) 
+  ) %>%
+  filter(
+    !is.na(disc_year),
+    !is.na(log_radius),
+    !is.na(log_period),
+    !is.na(st_met),
+    !is.na(st_teff_k),
+    !is.na(discoverymethod),
+    !is.na(log_st_mass)
+  )
+
+print(nrow(clean_data))
+head(clean_data)
+```
+
+# Bayesian estimation(Discrete)
+
+## Parameter Definition and Likelihood
+
+We are interested in estimating the rate of exoplanet discoveries per year. Let λ represent the average number of exoplanets discovered annually. Since the data consists of count data (non-negative integers) occurring over a fixed time interval, we model the yearly counts $y_i$ using a Poisson likelihood:
+$$y_i \sim Poisson(\lambda)$$
+## Prior Selection and Justification
+We assume a Gamma prior for the rate parameter λ, as the Gamma distribution is the conjugate prior for the Poisson likelihood and ensures λ remains positive. Specifically, we choose:
+$$\lambda \sim Gamma(2,0.1)$$
+This prior implies a mean discovery rate of E[λ]=α/β=20 planets per year. The variance is α/β2=200, which indicates a large spread. This serves as a weakly informative prior; it centers the search around a plausible magnitude (20) but remains flat enough to allow the data to dominate the posterior distribution if the observed rates are significantly higher or lower.
+
+## Closed Form Posterior
+We model: 
+
+$$\lambda | y \sim Gamma(a + \Sigma y, \beta + N)$$
+```{r}
+yearly_counts <- clean_data %>%
+  count(disc_year) %>%
+  rename(n_planets = n)
+
+head(yearly_counts)
+```
+
+```{r}
+alpha_prior <- 2
+beta_prior <- 0.1
+
+sum_y <- sum(yearly_counts$n_planets)
+N <- nrow(yearly_counts)
+alpha_post <- alpha_prior + sum_y
+beta_post <- beta_prior + N
+
+theoretical_post_mean = alpha_post / beta_post
+cat("Theoretical Posterior Mean:", theoretical_post_mean)
+```
+
+## MCMC Implementation
+
+```{r}
+poisson_stan_code <- "
+data {
+  int<lower=0> N;
+  int<lower=0> y[N];
+}
+parameters {
+  real<lower=0> lambda;
+}
+model {
+  lambda ~ gamma(2, 0.1);
+  y ~ poisson(lambda);
+}
+"
+
+stan_data <- list(
+  N = nrow(yearly_counts),
+  y = yearly_counts$n_planets
+)
+
+poisson_fit <- stan(
+  model_code = poisson_stan_code,
+  data = stan_data,
+  iter = 2000,
+  chains = 4
+)
+```
+
+## Prior Diagnostics, Trace Plot
+```{r}
+print(poisson_fit, pars = "lambda")
+color_scheme_set("brightblue")
+
+mcmc_trace(
+  as.array(poisson_fit),
+  pars = "lambda"
+)
+```
+
+## Density Plot
+```{r}
+mcmc_dens(as.array(poisson_fit), pars = "lambda")
+```
+ 
+## Autocorrelation Plot
+```{r}
+mcmc_acf(as.array(poisson_fit), pars = "lambda")
+```
+
+## R-Hat, Effective Sample Size
+```{r}
+summary(poisson_fit)$summary[, c("Rhat", "n_eff")]
+```
+
+## Comparison with MCMC mean
+```{r}
+posterior_samples <- extract(poisson_fit)$lambda
+mcmc_mean <- mean(posterior_samples)
+
+# Create a comparison table
+comparison_df <- data.frame(
+  Method = c("Theoretical (Exact)", "MCMC (Approximation)"),
+  Posterior_Mean = c(theoretical_post_mean, mcmc_mean)
+  )
+
+print(comparison_df)
+
+mcmc_dens(as.array(poisson_fit), pars = "lambda") +
+  stat_function(
+    fun = dgamma, 
+    args = list(shape = alpha_post, rate = beta_post), 
+    color = "red", 
+    size = 1.2
+  ) +
+  yaxis_text(TRUE) + 
+  ylab("density")
+```
+
+Here, we modeled the yearly number of exoplanet discoveries using a Poisson likelihood with $Gamma (2,0.1)$ prior on the rate parameter $\gamma$. 
+We estimated the posterior distribution using Hamiltonian Monte Carlo via Stan. Trace plots, density plots, and autocorrelation diagnostics indicate good chain mixing, given R-hat values hover around 1.00 and effective sample sizes appear high.
+We also derived the closed-form Gamma posterior due to conjugacy and found strong agreement between the theoretical posterior mean and the MCMC based posterior mean, confirming correct model implementation and convergence
+
+# Bayesian estimation(Continuous)
+
+## Parameter Definition and Likelihood
+
+We are interested in estimating the average orbital period of exoplanets (on the logarithmic scale). Let $y_i$ represent the log-period of the i-th planet. We model these values using a Normal likelihood with unknown mean μ and standard deviation σ:
+$$y_i \sim \mathcal{N}(\mu, \sigma)$$
+## Prior Selection and Justification
+We assign independent priors to the parameters μ and σ.
+Mean (μ):
+$$\mu \sim \mathcal{N}(5, 5)$$
+On the natural scale, a log-mean of 5 corresponds to ≈148 days. A standard deviation of 5 on the log scale is very broad, covering orbital periods from hours to centuries. This serves as a weakly informative prior, centering the search on plausible values while allowing the data to drive the result.
+
+Standard Deviation (σ):
+$$\sigma \sim \text{Normal}(0, 5)$$
+We use a Half-Normal prior (since σ>0) with a scale of 5. This allows for a wide range of variability in the data without being overly restrictive.
+
+## Closed Form Posterior
+Because we have chosen independent Normal priors for μ and σ , a closed-form analytical solution for the joint posterior distribution does not exist. Therefore, we rely entirely on the MCMC diagnostics to verify our results.
+
+```{r}
+y_val <- clean_data$log_period
+N_val <- length(y_val)
+
+mu_prior_mean <- 5.0
+mu_prior_sd   <- 5.0 
+
+stan_data_continuous <- list(
+  N    = N_val,
+  y    = y_val,
+  mu0  = mu_prior_mean,
+  tau0 = mu_prior_sd
+)
+
+continuous_stan_code <- "
+data {
+  int<lower=0> N;
+  vector[N] y;
+  real mu0;
+  real tau0;
+}
+parameters {
+  real mu;
+  real<lower=0> sigma;
+}
+model {
+  // Priors
+  mu ~ normal(mu0, tau0);
+  sigma ~ normal(0, 5);
+  
+  // Likelihood
+  y ~ normal(mu, sigma);
+}
+"
+
+fit_continuous <- stan(
+  model_code = continuous_stan_code,
+  data = stan_data_continuous,
+  iter = 2000,
+  chains = 4
+)
+```
+
+## Prior Diagnostics, Trace Plot
+
+```{r}
+print(fit_continuous, pars = c("mu", "sigma"))
+color_scheme_set("brightblue")
+
+mcmc_trace(
+  as.array(fit_continuous), 
+  pars = "mu"
+) + ggtitle("Trace Plot for Mu (Log Period)")
+```
+
+## Density Plot
+
+```{r}
+mcmc_dens(as.array(fit_continuous), pars = "mu") + 
+  ggtitle("Density Plot for Mu (Log Period)")
+```
+
+## Autocorrelation Plot
+
+```{r}
+mcmc_acf(as.array(fit_continuous), pars = c("mu", "sigma")) + 
+  ggtitle("Autocorrelation for Mu and Sigma")
+```
+
+## R-Hat, Effective Sample Size
+
+```{r}
+summary(fit_continuous)$summary[, c("Rhat", "n_eff")]
+```
+
+## Comparison with MCMC mean
+
+```{r}
+mcmc_mean <- summary(fit_continuous)$summary["mu", "mean"]
+mcmc_mean
+```
+
+Here, we modeled the log period of exoplanets using a Normal likelihood with a Normal prior on the mean $\mu$ and a Half-Normal prior on $\sigma$.
+We estimated the posterior distribution using Hamiltonian Monte Carlo via Stan. Trace plots, density plots, and autocorrelation diagnostics indicate good chain mixing, given R-hat values hover around 1.00 and effective sample sizes appear high.
+
+# Bayesian Regression Model
+
+## Model Specification
+We fit a multiple linear regression model to predict the log orbital period (log_period) based on stellar mass, effective temperature, metallicity, and the number of planets in the system.
+
+The model specification is:
+
+$$
+\mu_i = \alpha + \beta_1 (\text{log_st_mass}) + \beta_2 (\text{log_st_mass})^2 + \beta_3 (\text{st_teff_k}) + \beta_4 (\text{st_teff_k})^2 + \beta_5 (\text{st_met}) + \beta_6 (\text{sy_pnum})
+$$
+
+
+## Prior Selection
+* Coefficients ($\beta$): $\beta \sim \mathcal{N}(0, 2.5)$
+    We use weakly informative Normal priors. This assumes that, without seeing the data, we expect the effect sizes to be relatively small, but the variance of 2.5 allows for larger effects if the data strongly supports them.
+
+* Intercept ($\alpha$): $\alpha \sim \mathcal{N}(0, 10)$
+    A broad Normal prior centers the baseline expectation near 0 but allows for a wide range of baseline log-periods.
+
+* Auxiliary ($\sigma$): $\sigma \sim \text{Exp}(1)$
+    We use an Exponential prior for the error standard deviation to strictly constrain it to positive values and penalize extremely large residual variances.
+
+```{r}
+# Fit the model using rstanarm
+fit_stanarm <- stan_glm(
+  # poly(x, 2) fits a curve: intercept + linear_term + squared_term
+  log_period ~ poly(log_st_mass, 2) + poly(st_teff_k, 2) + st_met + sy_pnum,
+  
+  data = clean_data,
+  family = gaussian(),
+  
+  # Increasing adapt_delta slightly can help with non-linear terms if chains get stuck
+  control = list(adapt_delta = 0.95),
+  
+  prior = normal(location = 0, scale = 2.5, autoscale = TRUE),
+  prior_intercept = normal(location = 0, scale = 10, autoscale = TRUE),
+  prior_aux = exponential(rate = 1, autoscale = TRUE),
+  
+  chains = 4,
+  iter = 2000,
+  seed = 42
+)
+```
+
+## Diagnostics
+
+We apply the same MCMC diagnostics used in the previous sections to ensure convergence.
+
+### Trace Plots
+
+```{r}
+posterior_arr <- as.array(fit_stanarm)
+
+mcmc_trace(posterior_arr, 
+           pars = c("(Intercept)", "sy_pnum", "sigma"),
+           regex_pars = c("log_st_mass", "st_teff_k")) +
+  ggtitle("Trace Plots for Regression Coefficients")
+```
+
+### Density Plots
+
+```{r}
+mcmc_dens(posterior_arr, 
+          pars = c("sy_pnum", "sigma"),
+          regex_pars = "log_st_mass") +
+  ggtitle("Posterior Density for Select Parameters")
+```
+
+### Autocorrelation
+
+```{r}
+mcmc_acf(posterior_arr, 
+         pars = c("sy_pnum", "sigma"),
+         regex_pars = "log_st_mass") +
+  ggtitle("Autocorrelation")
+```
+
+### R-Hat and Effective Sample Size
+
+```{r}
+summary(fit_stanarm)[, c("Rhat", "n_eff")]
+```
+
+### Prior vs. Posterior Comparison
+
+We compared the posterior distributions to the priors to ensure our results were driven by the data rather than our initial assumptions.
+
+The plot below shows that the posterior distributions (dark blue) for parameters like `log_st_mass` and `sy_pnum` are significantly narrower and shifted compared to the broad, weakly informative priors (light lines). This indicates that the data provided strong information to update our beliefs.
+
+```{r}
+posterior_vs_prior(fit_stanarm, pars = c("sy_pnum", "st_met", "(Intercept)")) +
+  ggplot2::ggtitle("Prior vs Posterior Distributions") +
+  ggplot2::theme_minimal()
+
+```
+
+## Results and Interpretation
+
+```{r}
+# Summary of coefficients
+print(fit_stanarm, digits = 3)
+
+# Visualizing the posterior distributions of coefficients
+plot(fit_stanarm, "areas", prob = 0.95, prob_outer = 1)
+```
+
+**Interpretation:**
+
+  * **log\_st\_mass:** If the coefficient is positive, it suggests that more massive stars tend to host planets with longer orbital periods.
+  * **sy\_pnum:** A negative coefficient for the number of planets might indicate that systems with more planets tend to be packed closer to the star (shorter periods).
+  * The credible intervals (95%) do not contain zero for key parameters, indicating strong evidence for these effects.
+
+## Predictions
+
+We predict the `log_period` for a hypothetical star with median characteristics but a high number of planets (5 planets).
+
+```{r}
+# Create hypothetical data
+new_obs <- data.frame(
+  log_st_mass = median(clean_data$log_st_mass),
+  st_teff_k = median(clean_data$st_teff_k),
+  st_met = median(clean_data$st_met),
+  sy_pnum = 5
+)
+
+# Generate posterior predictive distribution
+post_preds <- posterior_predict(fit_stanarm, newdata = new_obs)
+
+# Summarize prediction
+cat("Predicted Log Period (Mean):", mean(post_preds), "\n")
+cat("95% Prediction Interval:", quantile(post_preds, probs = c(0.025, 0.975)), "\n")
+
+# Histogram of predicted values
+hist(post_preds, main = "Posterior Prediction for Hypothetical 5-Planet System", xlab = "Predicted Log Period")
+```
+
+## Model Evaluation
+
+We evaluate the model using Posterior Predictive Checks (PPC) and Leave-One-Out Cross-Validation (LOO).
+
+### Posterior Predictive Check
+
+This checks if the data generated by the model looks like the observed data.
+
+```{r}
+pp_check(fit_stanarm) + ggtitle("Posterior Predictive Check")
+```
+
+### Residuals vs Fitted Values
+We check the assumption of homoscedasticity (constant variance) by plotting residuals against fitted values. We look for a random scatter around 0. If we saw a "funnel" shape, it would indicate non-constant variance.
+
+```{r}
+mean_preds <- colMeans(posterior_predict(fit_stanarm))
+residuals <- clean_data$log_period - mean_preds
+
+tibble(Fitted = mean_preds, Residuals = residuals) %>%
+  ggplot(aes(x = Fitted, y = Residuals)) +
+  geom_point(alpha = 0.6) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "red") +
+  labs(title = "Residuals vs Fitted Values",
+       subtitle = "Check for homoscedasticity (random scatter expected)",
+       x = "Fitted Values (Log Period)",
+       y = "Residuals") +
+  theme_minimal()
+```
+# Linearity Check
+```{r}
+poly_residuals <- resid(stan_data)
+
+# If resid() returns a matrix (chains x obs), take the column means:
+if(is.matrix(poly_residuals)) {
+  poly_residuals <- colMeans(poly_residuals)
+}
+
+clean_data_poly_plot <- clean_data %>%
+  mutate(residuals = poly_residuals)
+
+# 2. Plot Residuals vs Mass (Checking if the curve is gone)
+p_poly1 <- ggplot(clean_data_poly_plot, aes(x = log_st_mass, y = residuals)) +
+  geom_point(alpha = 0.5) + 
+  geom_smooth(method = "loess", se = FALSE, color = "blue") +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  ggtitle("Poly Model: Residuals vs Mass") +
+  theme_minimal()
+
+# 3. Plot Residuals vs Temperature (Checking if the curve is gone)
+p_poly2 <- ggplot(clean_data_poly_plot, aes(x = st_teff_k, y = residuals)) +
+  geom_point(alpha = 0.5) + 
+  geom_smooth(method = "loess", se = FALSE, color = "blue") +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  ggtitle("Poly Model: Residuals vs Temp") +
+  theme_minimal()
+
+gridExtra::grid.arrange(p_poly1, p_poly2, ncol = 2)
+```
+
+
+
+### Cross Validation (LOO)
+
+We use the PSIS-LOO approximation to estimate the out-of-sample predictive performance.
+
+```{r}
+loo_result <- loo(fit_stanarm)
+print(loo_result)
+```
+
